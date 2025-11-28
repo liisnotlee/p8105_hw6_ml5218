@@ -1,0 +1,227 @@
+---
+title: "p8105_hw6_ml5218"
+author: "Muying Li"
+date: "2025-11-26"
+output: github_document
+---
+
+# Environment Setup
+Load necessary packages, set plot theme, set seed
+
+```{r}
+library(tidyverse)
+library(modelr)
+library(mgcv)
+set.seed(1)
+library(patchwork)
+#library(dplyr)
+# library(rvest)
+knitr::opts_chunk$set(
+  fig.path = "figs/",
+  fig.width = 6,
+  fig.asp = .6,
+  out.width = "90%"
+)
+
+theme_set(theme_minimal() + theme(legend.position = "bottom"))
+
+options(
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis"
+)
+
+scale_colour_discrete = scale_colour_viridis_d
+scale_fill_discrete = scale_fill_viridis_d
+```
+
+# Problem 1
+Tidy the raw data
+```{r}
+# load data and clean names
+homicide_data = read_csv("data/homicide-data.csv") |>
+  janitor::clean_names() |> 
+  mutate(
+    # create a city_state variable (e.g. “Baltimore, MD”) 
+    city_state = paste(str_trim(city), str_trim(state), sep = ", "),
+    # and a binary variable indicating whether the homicide is solved = closed by arrest (1), otherwise (0)
+    status = ifelse(disposition == "Closed by arrest", 1, 0),
+    # convert victim_age as numeric
+    # noted NA introduced by coercion
+    victim_age = as.numeric(victim_age)
+  ) |>
+  # omit Dallas, TX; Phoenix, AZ; Kansas City, MO; Tulsa, AL 
+  filter(
+    !city_state %in% c(
+      "Dallas, TX",
+      "Phoenix, AZ",
+      "Kansas City, MO",
+      "Tulsa, AL"
+    )
+  ) |> 
+  # limit analysis those for whom victim_race is white or black
+  filter(
+    victim_race %in% c("White", "Black")
+  )
+```
+
+Take a quick look on the data
+```{r}
+homicide_data |> 
+  count(victim_sex, victim_race)
+```
+
+Noted `victim_sex` has unknown values. Remove it.
+```{r}
+homicide_data = homicide_data |> 
+  filter(
+    victim_sex != "Unknown"
+  )
+```
+
+Take a quick look on the data again to ensure the quality
+```{r}
+homicide_data |> 
+  count(victim_sex, victim_race)
+```
+
+## Fit a logistic regression for the city of Baltimore, MD using the `glm`
+
+```{r}
+# save the output of `glm` as an R object
+baltimore_glm_results = 
+  homicide_data |> 
+  filter(
+    city_state == "Baltimore, MD"
+  ) |> 
+  # glm will auto remove rows w/ NA values
+  # fit a logistic regression with resolved vs unresolved as the outcome and victim age, sex and race as predictors 
+  glm(status ~ victim_age + victim_sex + victim_race, data = _, family = binomial) 
+
+# apply the broom::tidy to this object
+fit_baltimore = baltimore_glm_results |> 
+  # obtain the estimate and confidence interval of the adjusted odds ratio
+  broom::tidy(exponentiate = TRUE, conf.int = TRUE)
+
+# OR for solving homicides comparing male victims to female victims keeping all other variables fixed.
+fit_baltimore |> 
+  filter(grepl("victim_sex", term)) |> 
+  select(term, estimate, conf.low, conf.high, p.value)
+```
+Interpretation: After adjusting for victim age and race, the odds of a homicide being resolved are about 57% lower when the victim is male than when the victim is female.
+
+## Run `glm` for every city
+```{r}
+# wrap it into a function
+fit_city_model <- function(df) {
+  glm_results = glm(status ~ victim_age + victim_sex + victim_race, data = df, family = binomial) 
+  glm_results |> 
+    broom::tidy(exponentiate = TRUE, conf.int = TRUE) |> 
+    filter(grepl("victim_sex", term)) |> 
+    select(term, estimate, conf.low, conf.high, p.value)
+}
+```
+
+Run `glm` for all cities
+```{r}
+all_city_glm_results = homicide_data |> 
+  group_by(city_state) |> 
+  nest() |> 
+  mutate(fit_results = map(data, fit_city_model)) |>
+  unnest(fit_results)
+```
+
+Plotting
+```{r}
+all_city_glm_results |> 
+  ggplot(aes(x = estimate, y = fct_reorder(city_state, estimate)))+
+  geom_vline(xintercept = 1, linetype = "dashed", color = "gray50") +
+  geom_point(size = 1)+
+  geom_errorbarh(
+    aes(xmin = conf.low, xmax = conf.high),
+    height = 0.5
+  ) +                           
+  labs(
+    title = "Odds Ratios for Solving Homicides by Sex of Victim (Male vs Female)",
+    x = "Odds Ratio",
+    y = "City",
+  ) +
+  theme(
+    plot.title = element_text(size = 8),
+    axis.text.y = element_text(size = 5)
+  )
+```
+
+# Problem 2
+Load data
+```{r}
+library(p8105.datasets)
+data("weather_df")
+
+```
+## Simple linear regression with `tmax` as the response with `tmin` and `prcp` as the predictors
+
+Since we only care about `tmax`, `tmin`, and `prcp`, the dataframe will only keep these columns.
+```{r}
+weather_data <- weather_df |> 
+  select(tmax, tmin, prcp)
+```
+
+Run 5000 bootstrap samples
+```{r}
+weather_boot_results = weather_data |> 
+  bootstrap(n=5000) |> 
+  mutate(
+    df = map(strap, as_tibble),
+    fits = map(df, \(df) lm(tmax ~ tmin+prcp, data = df)),
+    # get betas
+    betas = map(fits, broom::tidy),
+    # get r squared
+    rsquared = map(fits, broom::glance)
+  ) |> 
+  select(.id, betas, rsquared) |> 
+  unnest(c(betas, rsquared), names_sep = "_") |> 
+  select(.id, betas_term, betas_estimate, rsquared_r.squared) |> 
+  filter(
+    betas_term != "(Intercept)"
+  ) |> 
+  # calculate beta1/beta2
+  group_by(.id) |>
+  summarize(
+    r_squared = first(rsquared_r.squared),
+    beta1 = betas_estimate[betas_term == "tmin"],
+    beta2 = betas_estimate[betas_term == "prcp"],
+    beta_ratio = beta1 / beta2,
+  ) 
+```
+
+Plot the estimates
+```{r}
+rsq_plot <- weather_boot_results |> 
+  ggplot(aes(x = r_squared)) +
+  geom_density() +
+  labs(
+    title = "Bootstrap Distribution of R-squared",
+    x = expression(R^2),
+    y = "Density"
+  )
+ratio_plot <- weather_boot_results |> 
+  ggplot(aes(x = beta_ratio)) +
+  geom_density() +
+  labs(
+    title = "Bootstrap Distribution of Beta-Ratio",
+    x = expression(hat(beta)[tmin] / hat(beta)[prcp]),
+    y = "Density"
+  )
+```
+
+```{r}
+rsq_plot
+```
+
+The distribution of R-squared appears to be approximately normal with a peak around 0.94. Noted a slight right skew accounted for a small degree of variability across samples. However, most of the bootstrap samples resulted in values of R-squared close to 0.94, which indicates good model fit. 
+
+```{r}
+ratio_plot
+```
+
+The distribution of coefficient ratio appears skewed to the right, with a peak around -180. The wide spread indicates great variability in their relationship between across the different bootstrap samples; some samples produce extreme values. Most bootstrap samples resulted in a negative ratio, implying that the estimated coefficient for `tmin` tends to be smaller than the estimated coefficient for `prcp`. In other words, `prcp` seems to havea higher impact on `tmax`.
