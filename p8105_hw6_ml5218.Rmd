@@ -225,3 +225,120 @@ ratio_plot
 ```
 
 The distribution of coefficient ratio appears skewed to the right, with a peak around -180. The wide spread indicates great variability in their relationship between across the different bootstrap samples; some samples produce extreme values. Most bootstrap samples resulted in a negative ratio, implying that the estimated coefficient for `tmin` tends to be smaller than the estimated coefficient for `prcp`. In other words, `prcp` seems to havea higher impact on `tmax`.
+
+
+# Problem 3
+Load & clean data
+```{r}
+bw_data <- read_csv("data/birthweight.csv") |>
+  janitor::clean_names() |> 
+  mutate(
+    babysex = factor(babysex, levels = c(1, 2), labels = c("male", "female")), # 1=male, 2=female
+    malform = factor(malform, levels = c(0, 1), labels = c("absent", "present")) # 0=absent, 1=present
+  )
+# check missingness
+bw_data |> summarise(across(everything(), ~ sum(is.na(.)))) 
+```
+
+No missing data in the dataframe. Quickly view the data, did not notice any strange data type. All columns are numeric values.
+
+## My regression model for birthweight proposal
+
+To model a newborn's birthweight (`bwt`), I plan to use the following clinically relevant maternal and gestational variables that does not need measurements from newborns.
+
+- `gaweeks`: mother's gestational age 
+- `malform`: whether the newborn has malformation which might affect the weight (0 = absent, 1 = present) 
+- `wtgain`: mother’s weight gain during pregnancy, which can reflect the mother's nutritional status and potential infant's weight
+- `delwt`: mother’s weight at delivery; this provides a baseline weight and takes mother's physical contribution to birthweight into consideration
+
+**STEP**
+1. fit the linear model
+```{r}
+bw_model = lm(
+  bwt ~ gaweeks + malform + wtgain + delwt + ppbmi,
+  data = bw_data
+) 
+```
+
+Quick look at the model outputs
+```{r}
+bw_model |> 
+  broom::tidy() |> 
+  knitr::kable(digits = 3)
+```
+
+2. run regression diagnostics with residuals & predictions
+```{r}
+ bw_data |> 
+  add_predictions(bw_model) |> 
+  add_residuals(bw_model) |> 
+  ggplot(aes(x = pred, y = resid)) +
+  geom_point(alpha = 0.4) + 
+  # Add the zero-residual line for reference
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 1) + 
+  labs(
+    title = "Model Diagnostics: Residuals vs. Fitted Values",
+    x = "Fitted Values (Predicted Birth Weight, grams)",
+    y = "Residuals (Observed - Predicted)"
+  )
+```
+
+From the plot, we can see that residuals do not show any curvature or clear pattern, indicating that the relationship between predictors and birthweight is approximately linear. There is no fanning out or contraction for higher or lower fitted values. All these suggest that the model might be a reasonable fit for the data.
+
+## Construct the two other models
+
+1. Model using length at birth and gestational age as predictors
+2. Model using head circumference, length, sex, and all interactions between these
+
+```{r}
+model_length_ga = lm(bwt ~ blength + gaweeks, data = bw_data)
+model_w_interactions = lm(bwt ~ bhead * blength * babysex, data = bw_data)
+```
+
+## Cross validation
+
+```{r}
+cv_df = 
+  crossv_mc(bw_data, n=100) |> 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)
+  )
+# pull 1st one to see if it works
+cv_df |> pull(train) |> nth(1)
+```
+
+Now fits the models
+```{r}
+cv_df = cv_df |> 
+  mutate(
+    my_fit = map(train, \(df) lm(bwt ~ gaweeks + malform + wtgain + delwt + ppbmi, data = df)),
+    no_inter_fit = map(train, \(df) lm(bwt ~ blength + gaweeks, data = df)),
+    w_inter_fit = map(train, \(df) lm(bwt ~ bhead * blength * babysex,  data = df)),
+  ) |> 
+  mutate(
+    # map2 has 2 input lists
+    rmse_my_model = map2_dbl(my_fit, test, rmse),
+    rmse_no_inter = map2_dbl(no_inter_fit, test, rmse),
+    rmse_w_inter = map2_dbl(w_inter_fit, test, rmse),
+  )
+```
+
+Compare models
+```{r}
+cv_df |> 
+  select(starts_with("rmse")) |> 
+  pivot_longer(
+    everything(),
+    names_to = "model",
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) |> 
+  ggplot(aes(x=model, y=rmse))+
+  geom_violin()+ 
+  labs(
+    title = "Violin Plot for Models Prediction Error Distribution"
+  )
+```
+
+From the error distribution plot above, the model using head circumference, length, sex, and all interactions between these is the best model with minimum prediction error. My model has the highest variability and the highest median RMSE, suggesting it may be less stable and more prone to large prediction errors in certain cases.
