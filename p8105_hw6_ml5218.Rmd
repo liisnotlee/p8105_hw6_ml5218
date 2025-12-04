@@ -194,6 +194,22 @@ weather_boot_results = weather_data |>
   ) 
 ```
 
+Calculate 95% confidence intervals
+```{r}
+ci <- weather_boot_results |>
+  summarize(
+    r_squared_LCL = quantile(r_squared, 0.025),
+    r_squared_UCL = quantile(r_squared, 0.975),
+    
+    beta_ratio_LCL = quantile(beta_ratio, 0.025),
+    beta_ratio_UCL = quantile(beta_ratio, 0.975)
+  )
+
+ci |> knitr::kable(digits = 3)
+```
+
+The 95% confidence interval for $r^2$ is (0.934, 0.947) and the 95% confidence interval for $\frac{\hat\beta_1}{\hat\beta_2}$ is (-279.749,-125.686).
+
 Plot the estimates
 ```{r}
 rsq_plot <- weather_boot_results |> 
@@ -201,7 +217,7 @@ rsq_plot <- weather_boot_results |>
   geom_density() +
   labs(
     title = "Bootstrap Distribution of R-squared",
-    x = expression(R^2),
+    x = expression(r^2),
     y = "Density"
   )
 ratio_plot <- weather_boot_results |> 
